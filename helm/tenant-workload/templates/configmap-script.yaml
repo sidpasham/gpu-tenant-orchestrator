@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: customer-{{ .Values.customerId }}-slurm-script
+  labels:
+    customer: {{ .Values.customerId | quote }}
+data:
+  submit_job.sh: |
+{{ .Files.Get "scripts/submit_job.sh" | indent 4 }}

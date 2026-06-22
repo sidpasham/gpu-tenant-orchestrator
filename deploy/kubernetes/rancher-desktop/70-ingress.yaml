@@ -1,0 +1,75 @@
+# Routes local HTTP traffic for the public API gateway.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  namespace: gpu-tenant-orchestrator
+spec:
+  rules:
+    - host: gpu-tenant.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  name: http
+---
+# Routes local HTTP traffic for the Prometheus UI.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: prometheus
+  namespace: gpu-tenant-orchestrator
+spec:
+  rules:
+    - host: prometheus.gpu-tenant.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus
+                port:
+                  name: http
+---
+# Routes local HTTP traffic for the Grafana UI.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: gpu-tenant-orchestrator
+spec:
+  rules:
+    - host: grafana.gpu-tenant.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  name: http
+---
+# Routes local HTTP traffic for the Temporal UI.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: temporal-ui
+  namespace: gpu-tenant-orchestrator
+spec:
+  rules:
+    - host: temporal.gpu-tenant.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: temporal
+                port:
+                  name: ui

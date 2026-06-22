@@ -1,0 +1,7 @@
+# Creates the platform namespace for all local orchestrator services.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-tenant-orchestrator
+  labels:
+    app.kubernetes.io/name: gpu-tenant-orchestrator

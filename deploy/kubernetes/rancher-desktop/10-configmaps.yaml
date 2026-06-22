@@ -1,0 +1,45 @@
+# Defines runtime configuration shared by the API, worker, Kafka, Temporal, and Helm integration.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-tenant-config
+  namespace: gpu-tenant-orchestrator
+data:
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  KAFKA_TOPIC: gpu-allocations
+  KAFKA_DLQ_TOPIC: gpu-allocations-dlq
+  TEMPORAL_HOST: temporal:7233
+  HELM_DRY_RUN: "false"
+  HELM_NAMESPACE: gpu-tenant-orchestrator
+  HELM_NAMESPACE_TEMPLATE: tenant-{customer_id}
+  HELM_CREATE_NAMESPACE: "true"
+  HELM_MOCK_GPU: "true"
+  HELM_KUBE_APISERVER: https://10.42.0.1:6443
+  HELM_KUBE_TLS_SERVER_NAME: 10.43.0.1
+  HELM_KUBE_CA_FILE: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+  HELM_KUBE_TOKEN_FILE: /var/run/secrets/kubernetes.io/serviceaccount/token
+  WORKER_HEALTH_PORT: "8081"
+  PYTHONUNBUFFERED: "1"
+---
+# Defines Prometheus scrape configuration for platform and application metrics.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: gpu-tenant-orchestrator
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+      - job_name: gpu-tenant-api
+        metrics_path: /metrics
+        static_configs:
+          - targets: ["api:8000"]
+      - job_name: gpu-tenant-worker
+        metrics_path: /metrics
+        static_configs:
+          - targets: ["worker:8081"]

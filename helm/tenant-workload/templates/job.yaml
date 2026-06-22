@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: customer-{{ .Values.customerId }}-slurm-submitter
+  labels:
+    customer: {{ .Values.customerId | quote }}
+    tier: {{ .Values.tier | quote }}
+spec:
+  template:
+    metadata:
+      labels:
+        customer: {{ .Values.customerId | quote }}
+        tier: {{ .Values.tier | quote }}
+    spec:
+      containers:
+      - name: slurm-cli
+        image: {{ .Values.image | quote }}
+        imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+        command: ["/bin/sh", "/opt/slurm-scripts/submit_job.sh"]
+        env:
+        - name: CUSTOMER_ID
+          value: {{ .Values.customerId | quote }}
+        - name: GPU_COUNT
+          value: {{ .Values.gpuCount | quote }}
+        - name: MOCK_GPU
+          value: {{ .Values.mockGpu | quote }}
+        resources:
+          limits:
+            {{- if .Values.mockGpu }}
+            cpu: {{ .Values.mockCpu | quote }}
+            {{- else }}
+            nvidia.com/gpu: {{ .Values.gpuCount | quote }}
+            {{- end }}
+          requests:
+            {{- if .Values.mockGpu }}
+            cpu: {{ .Values.mockCpu | quote }}
+            {{- else }}
+            nvidia.com/gpu: {{ .Values.gpuCount | quote }}
+            {{- end }}
+        volumeMounts:
+        - name: script-volume
+          mountPath: /opt/slurm-scripts
+      volumes:
+      - name: script-volume
+        configMap:
+          name: customer-{{ .Values.customerId }}-slurm-script
+          defaultMode: 0755
+      restartPolicy: Never
+  backoffLimit: 1
