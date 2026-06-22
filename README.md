@@ -39,17 +39,17 @@ deployment path.
 ```mermaid
 flowchart LR
     Client[Client] -->|POST /api/v1/tenant/allocate| API[FastAPI API]
-    API -->|produce confirmed allocation event| Kafka[(Kafka topic<br/>gpu-allocations)]
-    Kafka --> Dispatcher[Worker<br/>KafkaWorkflowDispatcher]
-    Dispatcher -->|start workflow| Temporal[Temporal<br/>GPUAllocationWorkflow]
+    API -->|produce confirmed allocation event| Kafka["Kafka topic<br/>gpu-allocations"]
+    Kafka --> Dispatcher["Worker<br/>KafkaWorkflowDispatcher"]
+    Dispatcher -->|start workflow| Temporal["Temporal<br/>GPUAllocationWorkflow"]
     Temporal --> Activity[run_helm_deploy activity]
     Activity --> Helm[Helm upgrade/install]
-    Helm --> Namespace[Tenant namespace<br/>tenant-{customer_id}]
-    Namespace --> ConfigMap[Tenant ConfigMap<br/>submit_job.sh]
+    Helm --> Namespace["Tenant namespace<br/>tenant-customer-id"]
+    Namespace --> ConfigMap["Tenant ConfigMap<br/>submit_job.sh"]
     Namespace --> Job[Tenant submitter Job]
-    Dispatcher -->|invalid event or workflow-start failure| DLQ[(Kafka topic<br/>gpu-allocations-dlq)]
+    Dispatcher -->|invalid event or workflow-start failure| DLQ["Kafka topic<br/>gpu-allocations-dlq"]
     API -->|/metrics| Prometheus[Prometheus]
-    Dispatcher -->|/metrics<br/>customer, tier, GPU, duration| Prometheus
+    Dispatcher -->|metrics: customer, tier, GPU, duration| Prometheus
     Prometheus --> Grafana[Grafana dashboard]
 ```
 
@@ -57,11 +57,11 @@ flowchart LR
 flowchart TB
     subgraph RD[Rancher Desktop Kubernetes]
         subgraph PlatformNS[gpu-tenant-orchestrator namespace]
-            ApiIngress[API Ingress<br/>gpu-tenant.localhost] --> ApiSvc[api Service]
+            ApiIngress["API Ingress<br/>gpu-tenant.localhost"] --> ApiSvc[api Service]
             ApiSvc --> ApiDeploy[api Deployment x2]
             ApiDeploy --> KafkaSvc[kafka Service]
 
-            WorkerSvc[worker Service<br/>:8081 health/metrics] --> WorkerDeploy[worker Deployment]
+            WorkerSvc["worker Service<br/>:8081 health/metrics"] --> WorkerDeploy[worker Deployment]
             WorkerDeploy --> KafkaSvc
             WorkerDeploy --> TemporalSvc[temporal Service]
             WorkerDeploy --> KubeApi[Kubernetes API]
@@ -72,11 +72,11 @@ flowchart TB
             PromDeploy --> WorkerSvc
             GrafanaIngress[Grafana Ingress] --> GrafanaSvc[grafana Service]
             GrafanaSvc --> GrafanaDeploy[grafana Deployment]
-            GrafanaDeploy --> GrafanaConfig[Provisioned dashboards<br/>and datasource ConfigMaps]
+            GrafanaDeploy --> GrafanaConfig["Provisioned dashboards<br/>and datasource ConfigMaps"]
             TemporalIngress[Temporal UI Ingress] --> TemporalSvc
         end
 
-        KubeApi --> TenantNS[Tenant namespaces<br/>tenant-team-a, tenant-team-b]
+        KubeApi --> TenantNS["Tenant namespaces<br/>tenant-team-a, tenant-team-b"]
         TenantNS --> TenantJobs[Tenant Helm Jobs and ConfigMaps]
     end
 ```
