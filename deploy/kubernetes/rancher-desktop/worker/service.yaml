@@ -1,0 +1,13 @@
+# Exposes the worker health and metrics port for probes and Prometheus.
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker
+  namespace: gpu-tenant-orchestrator
+spec:
+  selector:
+    app.kubernetes.io/name: gpu-tenant-worker
+  ports:
+    - name: health
+      port: 8081
+      targetPort: health

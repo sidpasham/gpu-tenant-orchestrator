@@ -1,0 +1,13 @@
+# Exposes Kafka inside the local Kubernetes cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: gpu-tenant-orchestrator
+spec:
+  selector:
+    app.kubernetes.io/name: kafka
+  ports:
+    - name: broker
+      port: 29092
+      targetPort: broker

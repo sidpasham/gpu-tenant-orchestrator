@@ -1,0 +1,28 @@
+[
+  {
+    "pool_id": "phoenix-mock-gpu-pool",
+    "region": "us-phoenix-1",
+    "cluster": "rancher-desktop",
+    "gpu_type": "mock",
+    "total_gpus": 4,
+    "priority": 100,
+    "healthy": true,
+    "latency_ms_by_region": {
+      "us-phoenix-1": 5,
+      "us-ashburn-1": 64
+    }
+  },
+  {
+    "pool_id": "ashburn-mock-gpu-pool",
+    "region": "us-ashburn-1",
+    "cluster": "rancher-desktop",
+    "gpu_type": "mock",
+    "total_gpus": 8,
+    "priority": 80,
+    "healthy": true,
+    "latency_ms_by_region": {
+      "us-phoenix-1": 64,
+      "us-ashburn-1": 5
+    }
+  }
+]

@@ -16,13 +16,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential \
+    && apt-get install -y --no-install-recommends libpq5 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser
 COPY --from=helm-downloader /usr/local/bin/helm /usr/local/bin/helm
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-common.txt requirements-worker.txt ./
+RUN pip install --no-cache-dir -r requirements-worker.txt
+COPY --chown=appuser:appuser config/ ./config
 COPY --chown=appuser:appuser src/ ./src
 COPY --chown=appuser:appuser helm/ ./helm
 USER appuser

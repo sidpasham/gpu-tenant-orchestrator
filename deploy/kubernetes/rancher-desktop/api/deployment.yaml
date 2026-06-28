@@ -1,0 +1,54 @@
+# Runs the FastAPI gateway replicas that accept tenant allocation requests.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: gpu-tenant-orchestrator
+  labels:
+    app.kubernetes.io/name: gpu-tenant-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-tenant-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-tenant-api
+    spec:
+      serviceAccountName: gpu-tenant-api
+      containers:
+        - name: api
+          image: gpu-tenant-orchestrator-api:local
+          imagePullPolicy: Never
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 10001
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: gpu-tenant-config
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

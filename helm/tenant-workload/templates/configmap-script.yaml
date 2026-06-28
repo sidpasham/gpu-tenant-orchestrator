@@ -4,6 +4,12 @@ metadata:
   name: customer-{{ .Values.customerId }}-slurm-script
   labels:
     customer: {{ .Values.customerId | quote }}
+  annotations:
+    gpu-tenant-orchestrator.io/assigned-region: {{ .Values.assignedRegion | quote }}
+    gpu-tenant-orchestrator.io/assigned-cluster: {{ .Values.assignedCluster | quote }}
+    gpu-tenant-orchestrator.io/gpu-pool-id: {{ .Values.gpuPoolId | quote }}
+    gpu-tenant-orchestrator.io/gpu-type: {{ .Values.gpuType | quote }}
+    gpu-tenant-orchestrator.io/reservation-id: {{ .Values.reservationId | quote }}
 data:
   submit_job.sh: |
 {{ .Files.Get "scripts/submit_job.sh" | indent 4 }}

@@ -1,6 +1,12 @@
 customerId: "default-user"
 tier: "standard"
 gpuCount: 1
+gpuType: "mock"
+assignedRegion: "unassigned"
+assignedCluster: "unassigned"
+gpuPoolId: "unassigned"
+reservationId: "unassigned"
+latencyMs: 0
 image: "alpine:3.20"
 imagePullPolicy: "IfNotPresent"
 mockGpu: true

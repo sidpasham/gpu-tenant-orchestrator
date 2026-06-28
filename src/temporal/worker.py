@@ -13,6 +13,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from src.shared.config import (
+    GPU_PROFILES_CONFIG,
     KAFKA_BOOTSTRAP_SERVERS,
     KAFKA_DLQ_TOPIC,
     KAFKA_STARTUP_RETRY_SECONDS,
@@ -25,8 +26,15 @@ from src.shared.config import (
     WORKER_HEALTH_HOST,
     WORKER_HEALTH_PORT,
     WORKFLOW_RESULT_TIMEOUT_SECONDS,
+    validate_runtime_config,
 )
-from src.temporal.activities import run_helm_deploy
+from src.shared.gpu_profiles import load_gpu_profiles
+from src.temporal.activities import (
+    activate_gpu_reservation,
+    plan_gpu_allocation,
+    release_gpu_reservation,
+    run_helm_deploy,
+)
 from src.temporal.workflows import GPUAllocationWorkflow
 
 
@@ -37,7 +45,7 @@ RETRYABLE_KAFKA_ERRORS = {
     KafkaError._TRANSPORT,
     KafkaError._ALL_BROKERS_DOWN,
 }
-GPU_COUNT_BY_TIER = {"premium": 2, "standard": 1}
+GPU_COUNT_BY_TIER = load_gpu_profiles(GPU_PROFILES_CONFIG).gpu_counts_by_tier()
 
 
 def is_retryable_kafka_error(error: KafkaError) -> bool:
@@ -59,6 +67,16 @@ def is_topic_already_exists_error(exc: Exception) -> bool:
 
 def prometheus_label_value(value: Any) -> str:
     return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def workflow_completion_status(result: Any) -> str:
+    if not isinstance(result, dict):
+        return "success"
+
+    status = str(result.get("status", "success")).lower()
+    if status == "active":
+        return "success"
+    return status
 
 
 @dataclass
@@ -460,7 +478,8 @@ class KafkaWorkflowDispatcher:
         print(f"Pulled event from Kafka: {data}, spinning up Temporal Workflow...")
         allocation_start_time = time.monotonic()
         try:
-            self.start_workflow(data)
+            workflow_result = self.start_workflow(data)
+            completion_status = workflow_completion_status(workflow_result)
             allocation_duration_seconds = time.monotonic() - allocation_start_time
             self.state.record_consumed_message()
             self.state.record_customer_allocation(
@@ -470,7 +489,7 @@ class KafkaWorkflowDispatcher:
             self.state.record_customer_allocation_completion(
                 str(data["customer_id"]),
                 str(data["tier"]),
-                "success",
+                completion_status,
                 allocation_duration_seconds,
             )
         except Exception as exc:
@@ -504,18 +523,19 @@ class KafkaWorkflowDispatcher:
             raise ValueError("message must be a JSON object with customer_id and tier")
         return data
 
-    def start_workflow(self, data: dict[str, Any]) -> None:
+    def start_workflow(self, data: dict[str, Any]) -> Any:
         workflow_future: Future = asyncio.run_coroutine_threadsafe(
             self.execute_workflow(data),
             self.temporal_loop,
         )
-        workflow_future.result(timeout=self.workflow_result_timeout_seconds)
+        return workflow_future.result(timeout=self.workflow_result_timeout_seconds)
 
     async def execute_workflow(self, data: dict[str, Any]) -> Any:
+        workflow_key = data.get("allocation_id") or data["customer_id"]
         workflow_handle = await self.temporal_client.start_workflow(
             GPUAllocationWorkflow.run,
             data,
-            id=f"gpu-alloc-{data['customer_id']}",
+            id=f"gpu-alloc-{workflow_key}",
             task_queue="gpu-allocation-tasks",
         )
         return await workflow_handle.result()
@@ -598,6 +618,7 @@ async def connect_temporal_with_retry(
 
 
 async def main():
+    validate_runtime_config("worker")
     health_server = start_health_server(HEALTH_STATE)
     client = await connect_temporal_with_retry(HEALTH_STATE)
     loop = asyncio.get_running_loop()
@@ -610,7 +631,12 @@ async def main():
         client,
         task_queue="gpu-allocation-tasks",
         workflows=[GPUAllocationWorkflow],
-        activities=[run_helm_deploy],
+        activities=[
+            plan_gpu_allocation,
+            run_helm_deploy,
+            activate_gpu_reservation,
+            release_gpu_reservation,
+        ],
     )
     print("Temporal Activity and Workflow Worker successfully active.")
     HEALTH_STATE.set_temporal_worker_running(True)

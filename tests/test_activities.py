@@ -18,6 +18,78 @@ def test_get_allocation_rules_returns_zero_for_unsupported_input():
     assert activities.get_allocation_rules(None) == 0
 
 
+def test_plan_gpu_allocation_reserves_capacity_with_default_policy(monkeypatch):
+    heartbeats = []
+    captured_requests = []
+
+    class FakeScheduler:
+        def reserve(self, placement_request):
+            captured_requests.append(placement_request)
+            return {
+                "status": "RESERVED",
+                "reservation_id": "resv-team-a-premium-mock-2",
+                "assigned_region": "us-phoenix-1",
+            }
+
+    monkeypatch.setattr(activities, "DEFAULT_CUSTOMER_REGION", "us-phoenix-1")
+    monkeypatch.setattr(activities, "get_placement_scheduler", lambda: FakeScheduler())
+    monkeypatch.setattr(activities.activity, "heartbeat", heartbeats.append)
+
+    result = asyncio.run(
+        activities.plan_gpu_allocation(
+            {
+                "allocation_id": "alloc-123",
+                "customer_id": "team-a",
+                "tier": "premium",
+            }
+        )
+    )
+
+    assert result["status"] == "RESERVED"
+    assert heartbeats == ["Planning GPU placement and reserving capacity"]
+    assert len(captured_requests) == 1
+    placement_request = captured_requests[0]
+    assert placement_request.customer_id == "team-a"
+    assert placement_request.gpu_count == 2
+    assert placement_request.gpu_type == "mock"
+    assert placement_request.preferred_region == "us-phoenix-1"
+    assert placement_request.allowed_regions == ("us-phoenix-1",)
+    assert placement_request.max_latency_ms == 80
+    assert placement_request.allocation_id == "alloc-123"
+
+
+def test_plan_gpu_allocation_uses_requested_fallback_policy(monkeypatch):
+    captured_requests = []
+
+    class FakeScheduler:
+        def reserve(self, placement_request):
+            captured_requests.append(placement_request)
+            return {"status": "PENDING_CAPACITY"}
+
+    monkeypatch.setattr(activities, "DEFAULT_CUSTOMER_REGION", "us-phoenix-1")
+    monkeypatch.setattr(activities, "get_placement_scheduler", lambda: FakeScheduler())
+    monkeypatch.setattr(activities.activity, "heartbeat", lambda _: None)
+
+    result = asyncio.run(
+        activities.plan_gpu_allocation(
+            {
+                "customer_id": "team-a",
+                "tier": "standard",
+                "preferred_region": "us-phoenix-1",
+                "allowed_regions": ["us-ashburn-1"],
+                "max_latency_ms": 80,
+                "gpu_type": "mock",
+            }
+        )
+    )
+
+    assert result["status"] == "PENDING_CAPACITY"
+    placement_request = captured_requests[0]
+    assert placement_request.gpu_count == 1
+    assert placement_request.allowed_regions == ("us-phoenix-1", "us-ashburn-1")
+    assert placement_request.max_latency_ms == 80
+
+
 def test_run_helm_deploy_builds_expected_command(monkeypatch):
     calls = []
     heartbeats = []
@@ -160,6 +232,53 @@ def test_run_helm_deploy_uses_configured_namespace_and_gpu_mode(monkeypatch):
     assert "--namespace" in calls[0]
     assert "gpu-tenant-orchestrator" in calls[0]
     assert "mockGpu=false" in calls[0]
+
+
+def test_run_helm_deploy_passes_reserved_placement_to_helm(monkeypatch):
+    calls = []
+
+    def fake_run(command, capture_output, text, timeout):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(activities, "HELM_DRY_RUN", False)
+    monkeypatch.setattr(activities, "HELM_NAMESPACE", "default")
+    monkeypatch.setattr(activities, "HELM_NAMESPACE_TEMPLATE", "")
+    monkeypatch.setattr(activities, "HELM_CREATE_NAMESPACE", False)
+    monkeypatch.setattr(activities, "HELM_MOCK_GPU", True)
+    monkeypatch.setattr(activities, "HELM_KUBE_APISERVER", "")
+    monkeypatch.setattr(activities, "HELM_KUBE_TLS_SERVER_NAME", "")
+    monkeypatch.setattr(activities, "HELM_KUBE_CA_FILE", "")
+    monkeypatch.setattr(activities, "HELM_KUBE_TOKEN_FILE", "")
+    monkeypatch.setattr(activities, "HELM_KUBE_INSECURE_SKIP_TLS_VERIFY", False)
+    monkeypatch.setattr(activities.subprocess, "run", fake_run)
+    monkeypatch.setattr(activities.activity, "heartbeat", lambda _: None)
+
+    asyncio.run(
+        activities.run_helm_deploy(
+            {
+                "customer_id": "team-a",
+                "tier": "premium",
+                "placement": {
+                    "status": "RESERVED",
+                    "reservation_id": "resv-team-a-premium-mock-2",
+                    "assigned_region": "us-phoenix-1",
+                    "assigned_cluster": "cluster-a",
+                    "gpu_pool_id": "phoenix",
+                    "gpu_type": "mock",
+                    "gpu_count": 2,
+                    "latency_ms": 5,
+                },
+            }
+        )
+    )
+
+    assert "assignedRegion=us-phoenix-1" in calls[0]
+    assert "assignedCluster=cluster-a" in calls[0]
+    assert "gpuPoolId=phoenix" in calls[0]
+    assert "gpuType=mock" in calls[0]
+    assert "reservationId=resv-team-a-premium-mock-2" in calls[0]
+    assert "latencyMs=5" in calls[0]
 
 
 def test_run_helm_deploy_can_target_tenant_namespace(monkeypatch):

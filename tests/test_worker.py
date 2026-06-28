@@ -85,6 +85,27 @@ class FakeAdmin:
         }
 
 
+class FakeWorkflowHandle:
+    async def result(self):
+        return {"status": "ACTIVE"}
+
+
+class FakeTemporalClient:
+    def __init__(self):
+        self.started_workflows = []
+
+    async def start_workflow(self, workflow, data, id, task_queue):
+        self.started_workflows.append(
+            {
+                "workflow": workflow,
+                "data": data,
+                "id": id,
+                "task_queue": task_queue,
+            }
+        )
+        return FakeWorkflowHandle()
+
+
 def test_is_retryable_kafka_error_accepts_startup_and_empty_partition_errors():
     assert worker.is_retryable_kafka_error(
         FakeKafkaError(worker.KafkaError.UNKNOWN_TOPIC_OR_PART)
@@ -201,6 +222,27 @@ def test_dispatcher_ensures_primary_and_dlq_topics():
     ]
 
 
+def test_dispatcher_uses_allocation_id_for_workflow_identity():
+    temporal_client = FakeTemporalClient()
+    dispatcher = worker.KafkaWorkflowDispatcher(
+        temporal_client=temporal_client,
+        temporal_loop=None,
+    )
+
+    result = asyncio.run(
+        dispatcher.execute_workflow(
+            {
+                "allocation_id": "alloc-123",
+                "customer_id": "team-a",
+                "tier": "premium",
+            }
+        )
+    )
+
+    assert result == {"status": "ACTIVE"}
+    assert temporal_client.started_workflows[0]["id"] == "gpu-alloc-alloc-123"
+
+
 def test_dispatcher_treats_existing_topics_as_ready():
     admin = FakeAdmin(
         {
@@ -299,6 +341,39 @@ def test_dispatcher_records_customer_allocation_after_workflow_start(monkeypatch
     }
     assert snapshot["customer_allocation_completions"] == {
         ("team-a", "premium", "success"): 1
+    }
+    assert len(consumer.commits) == 1
+
+
+def test_dispatcher_records_pending_capacity_without_dlq(monkeypatch):
+    state = worker.WorkerHealthState()
+    consumer = FakeConsumer(
+        [FakeMessage(value=b'{"customer_id":"team-a","tier":"premium"}')]
+    )
+    producer = FakeProducer()
+    dispatcher = worker.KafkaWorkflowDispatcher(
+        temporal_client=None,
+        temporal_loop=None,
+        state=state,
+        kafka_topic="gpu-allocations",
+        dlq_topic="gpu-allocations-dlq",
+    )
+    dispatcher.consumer = consumer
+    dispatcher.dlq_producer = producer
+    monkeypatch.setattr(
+        dispatcher,
+        "start_workflow",
+        lambda _data: {"status": "PENDING_CAPACITY"},
+    )
+
+    dispatcher.poll_once()
+
+    snapshot = state.snapshot()
+    assert producer.records == []
+    assert snapshot["messages_consumed_total"] == 1
+    assert snapshot["workflow_start_failures_total"] == 0
+    assert snapshot["customer_allocation_completions"] == {
+        ("team-a", "premium", "pending_capacity"): 1
     }
     assert len(consumer.commits) == 1
 

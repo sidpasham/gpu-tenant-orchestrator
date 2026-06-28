@@ -72,11 +72,43 @@ def test_allocate_gpu_accepts_valid_request_and_publishes_event(monkeypatch):
     record = producer.records[0]
     assert record["topic"] == api.KAFKA_TOPIC
     assert record["key"] == "team-a"
-    assert json.loads(record["value"]) == {
+    payload = json.loads(record["value"])
+    assert payload.pop("allocation_id").startswith("alloc-")
+    assert payload == {
         "customer_id": "team-a",
         "tier": "premium",
     }
     assert callable(record["callback"])
+
+
+def test_allocate_gpu_publishes_optional_placement_preferences(monkeypatch):
+    producer = DummyProducer()
+    monkeypatch.setattr(api, "get_producer", lambda: producer)
+    client = TestClient(api.app)
+
+    response = client.post(
+        "/api/v1/tenant/allocate",
+        json={
+            "customer_id": "team-a",
+            "tier": "Premium",
+            "preferred_region": "US-PHOENIX-1",
+            "allowed_regions": ["US-PHOENIX-1", "us-ashburn-1", "us-ashburn-1"],
+            "max_latency_ms": 80,
+            "gpu_type": "MOCK",
+        },
+    )
+
+    assert response.status_code == 202
+    payload = json.loads(producer.records[0]["value"])
+    assert payload.pop("allocation_id").startswith("alloc-")
+    assert payload == {
+        "customer_id": "team-a",
+        "tier": "premium",
+        "preferred_region": "us-phoenix-1",
+        "allowed_regions": ["us-phoenix-1", "us-ashburn-1"],
+        "max_latency_ms": 80,
+        "gpu_type": "mock",
+    }
 
 
 def test_health_and_readiness_endpoints_do_not_require_kafka():
@@ -130,6 +162,25 @@ def test_allocate_gpu_rejects_invalid_customer_id(monkeypatch):
     response = client.post(
         "/api/v1/tenant/allocate",
         json={"customer_id": "Team A", "tier": "standard"},
+    )
+
+    assert response.status_code == 422
+    assert producer.records == []
+    assert producer.flush_calls == []
+
+
+def test_allocate_gpu_rejects_invalid_allowed_region(monkeypatch):
+    producer = DummyProducer()
+    monkeypatch.setattr(api, "get_producer", lambda: producer)
+    client = TestClient(api.app)
+
+    response = client.post(
+        "/api/v1/tenant/allocate",
+        json={
+            "customer_id": "team-a",
+            "tier": "standard",
+            "allowed_regions": ["us_phoenix_1"],
+        },
     )
 
     assert response.status_code == 422

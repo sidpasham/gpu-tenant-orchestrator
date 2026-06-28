@@ -22,15 +22,17 @@ deployment path.
 - Accept validated tenant GPU allocation requests over HTTP.
 - Normalize request data before publishing it to Kafka.
 - Consume allocation events and start a Temporal workflow per tenant request.
+- Choose a deterministic GPU pool using region, latency, health, GPU type, and
+  available capacity.
 - Execute a Helm upgrade/install for the tenant workload chart.
 - Support local development with Rancher Desktop Kubernetes, unit tests, and
   mock GPU mode.
 
 ## Non-Goals
 
-- GPU cluster autoscaling.
+- GPU cluster autoscaling or cloud capacity procurement.
 - Billing, quota enforcement, or approval workflows.
-- Multi-cloud placement decisions.
+- Multi-cloud placement decisions beyond the configured pool inventory.
 - Production identity, authorization, and audit systems.
 - Full Slurm or Kubernetes operator lifecycle management.
 
@@ -42,7 +44,9 @@ flowchart LR
     API -->|produce confirmed allocation event| Kafka["Kafka topic<br/>gpu-allocations"]
     Kafka --> Dispatcher["Worker<br/>KafkaWorkflowDispatcher"]
     Dispatcher -->|start workflow| Temporal["Temporal<br/>GPUAllocationWorkflow"]
-    Temporal --> Activity[run_helm_deploy activity]
+    Temporal --> Scheduler["plan_gpu_allocation activity<br/>region-aware reservation"]
+    Scheduler -->|reserved| Activity[run_helm_deploy activity]
+    Scheduler -->|no acceptable capacity| Pending["PENDING_CAPACITY<br/>no Helm deploy"]
     Activity --> Helm[Helm upgrade/install]
     Helm --> Namespace["Tenant namespace<br/>tenant-customer-id"]
     Namespace --> ConfigMap["Tenant ConfigMap<br/>submit_job.sh"]
@@ -89,41 +93,110 @@ flowchart TB
 | Shared config | `src/shared/config.py` | Reads runtime configuration from environment variables. |
 | Kafka dispatcher and worker | `src/temporal/worker.py` | Owns Kafka consumer lifecycle, starts Temporal workflows on the worker event loop, exposes worker health/metrics, and routes failed events to the DLQ. |
 | Workflow | `src/temporal/workflows.py` | Defines the `GPUAllocationWorkflow` orchestration boundary. |
-| Activity | `src/temporal/activities.py` | Validates deployment data and runs Helm. |
+| Placement scheduler | `src/placement/scheduler.py` | Scores configured GPU pools, reserves available capacity, and returns pending capacity when no allowed pool fits. |
+| Activity | `src/temporal/activities.py` | Validates placement/deployment data, reserves/releases GPU capacity, and runs Helm. |
 | Tenant chart | `helm/tenant-workload` | Creates the workload submitter ConfigMap and Job. |
-| Rancher Desktop Kubernetes stack | `deploy/kubernetes/rancher-desktop/*.yaml` | Runs the production-like local environment in Kubernetes with in-cluster RBAC. |
+| Rancher Desktop Kubernetes stack | `deploy/kubernetes/rancher-desktop` | Runs the production-like local environment in Kubernetes with in-cluster RBAC. |
 | Local deployment helper | `scripts/local-kubernetes-deploy.sh` | Builds images and starts, stops, checks, or tails the local Kubernetes stack. |
 
 ## Kubernetes Manifest Layout
 
-The Rancher Desktop stack is split by Kubernetes resource type:
+The Rancher Desktop stack is split by service/domain. Each folder owns the
+Kubernetes resources for that component:
 
-| File | Resource group |
+| Folder | Resource group |
 | --- | --- |
-| `deploy/kubernetes/rancher-desktop/00-namespace.yaml` | Platform namespace. |
-| `deploy/kubernetes/rancher-desktop/10-configmaps.yaml` | App runtime config and Prometheus config. |
-| `deploy/kubernetes/rancher-desktop/20-serviceaccounts.yaml` | API and worker service accounts. |
-| `deploy/kubernetes/rancher-desktop/30-roles.yaml` | Worker Helm ClusterRole. |
-| `deploy/kubernetes/rancher-desktop/31-rolebindings.yaml` | Worker ClusterRoleBinding. |
-| `deploy/kubernetes/rancher-desktop/35-services.yaml` | Kafka, Temporal, API, worker, Prometheus, and Grafana Services. |
-| `deploy/kubernetes/rancher-desktop/40-deployments.yaml` | Kafka, Temporal, API, worker, Prometheus, and Grafana Deployments. |
-| `deploy/kubernetes/rancher-desktop/70-ingress.yaml` | API, Temporal UI, Prometheus, and Grafana Ingresses. |
+| `deploy/kubernetes/rancher-desktop/shared` | Platform namespace and shared runtime ConfigMap. |
+| `deploy/kubernetes/rancher-desktop/api` | API ServiceAccount, Deployment, Service, and Ingress. |
+| `deploy/kubernetes/rancher-desktop/worker` | Worker ServiceAccount, RBAC, Deployment, and Service. |
+| `deploy/kubernetes/rancher-desktop/kafka` | Kafka Deployment and Service. |
+| `deploy/kubernetes/rancher-desktop/temporal` | Temporal Deployment, Service, and UI Ingress. |
+| `deploy/kubernetes/rancher-desktop/monitoring/prometheus` | Prometheus ConfigMap, Deployment, Service, and Ingress. |
+| `deploy/kubernetes/rancher-desktop/monitoring/grafana` | Grafana Deployment, Service, and Ingress. |
+| `deploy/kubernetes/rancher-desktop/database` | Optional Postgres secret example. Not applied by the local deploy script. |
+
+`scripts/local-kubernetes-deploy.sh` owns the apply order so dependencies such
+as namespace, shared config, service accounts, RBAC, services, deployments, and
+ingresses are created in a stable sequence.
 
 ## Request Flow
 
 1. A client sends a tenant allocation request to the FastAPI service.
-2. The API validates `customer_id` and `tier`.
-3. The API publishes a normalized event to Kafka and waits for delivery
+2. The API validates `customer_id`, `tier`, and optional placement preferences.
+3. The API adds an internal `allocation_id`, publishes a normalized event to
+   Kafka, and waits for delivery
    confirmation before returning `202`.
 4. The worker dispatcher ensures the primary and DLQ Kafka topics exist before subscribing.
 5. The worker dispatcher consumes the Kafka event and validates the message shape.
-6. The worker starts a Temporal workflow with ID `gpu-alloc-{customer_id}` and
+6. The worker starts a Temporal workflow with ID `gpu-alloc-{allocation_id}` and
    waits for the workflow result before committing the Kafka offset.
-7. The workflow runs the Helm deployment activity.
-8. The activity maps the tenant tier to a GPU count and resolves the tenant namespace.
-9. The activity runs `helm upgrade --install`, optionally creating the namespace.
-10. The Helm chart creates a tenant-specific Kubernetes Job and ConfigMap.
-11. Invalid events and workflow-start failures are published to `KAFKA_DLQ_TOPIC`.
+7. The workflow runs the GPU placement activity.
+8. The placement activity maps the tenant tier to a GPU count, filters configured
+   pools by GPU type, allowed regions, latency budget, and health, then reserves
+   capacity if available.
+9. If no acceptable pool has capacity, the workflow completes as
+   `PENDING_CAPACITY` and does not run Helm.
+10. If capacity is reserved, the workflow runs the Helm deployment activity with
+    the selected region, cluster, pool, GPU type, reservation ID, and latency.
+11. The activity runs `helm upgrade --install`, optionally creating the namespace.
+12. The Helm chart creates a tenant-specific Kubernetes Job and ConfigMap.
+13. If Helm fails after reservation, the workflow releases the GPU reservation.
+14. Invalid events and workflow-start failures are published to `KAFKA_DLQ_TOPIC`.
+
+## Placement And Capacity Model
+
+The placement scheduler supports two reservation stores:
+
+| Backend | Use case |
+| --- | --- |
+| `memory` | Local development and unit tests. Reservations live in the worker process. |
+| `postgres` | Durable reservations across worker restarts and multiple worker processes. |
+
+The checked-in local stack defaults to `memory`. Set
+`PLACEMENT_STORE_BACKEND=postgres` and `GPU_PLACEMENT_DATABASE_URL` to use
+PostgreSQL, including Neon.
+
+The placement rules are the same for both stores:
+
+1. Normalize the requested tier into a GPU count.
+2. Use the requested `gpu_type` or the profile's default `gpu_type`.
+3. Use `preferred_region` or `DEFAULT_CUSTOMER_REGION`.
+4. If `allowed_regions` is omitted, only the preferred region is allowed.
+5. If `allowed_regions` is provided, the preferred region is included first.
+6. Filter pools by health, GPU type, allowed region, and `max_latency_ms`.
+7. Rank candidates by preferred region, lower latency, best-fit remaining
+   capacity, higher priority, and stable pool ID.
+8. Reserve atomically or return `PENDING_CAPACITY`.
+
+The orchestrator does not silently move a tenant to a distant region. A fallback
+region is eligible only when the request or default policy allows that region and
+the latency budget is satisfied.
+
+When using Postgres, the store creates these tables automatically if they do not
+exist:
+
+- `gpu_pool_locks`: one row per pool, locked with `SELECT ... FOR UPDATE`
+  during reservation.
+- `gpu_reservations`: durable reservation rows with `RESERVED`, `ACTIVE`, and
+  `RELEASED` status.
+
+The pool lock prevents two worker transactions from reserving the same free GPUs
+at the same time. The pool inventory itself still comes from
+`GPU_POOLS_CONFIG_PATH` or `GPU_POOLS_CONFIG`; Postgres stores reservation state,
+not the pool catalog.
+
+## Versioned Catalog Config
+
+Catalog-style config is stored as JSON under `config/`:
+
+| File | Purpose |
+| --- | --- |
+| `config/gpu-profiles.json` | Product tier catalog: GPU count, default GPU type, and default latency budget. |
+| `config/gpu-pools.local.json` | Local Rancher Desktop pool seed used by the placement scheduler. |
+
+These are versioned because they describe product and placement policy. Runtime
+endpoints, credentials, TLS options, and deployment environment flags stay in
+environment variables or Kubernetes Secrets.
 
 ## API Contract
 
@@ -139,9 +212,21 @@ Request:
 ```json
 {
   "customer_id": "team-a",
-  "tier": "premium"
+  "tier": "premium",
+  "preferred_region": "us-phoenix-1",
+  "allowed_regions": ["us-phoenix-1", "us-ashburn-1"],
+  "max_latency_ms": 80,
+  "gpu_type": "mock"
 }
 ```
+
+Only `customer_id` and `tier` are required. If placement fields are omitted, the
+worker uses `DEFAULT_CUSTOMER_REGION` plus the tier defaults from
+`config/gpu-profiles.json`; fallback to another region is not allowed unless
+`allowed_regions` is provided.
+
+The API adds `allocation_id` to the Kafka event. Clients do not send it; the
+worker uses it for Temporal workflow identity and reservation identity.
 
 Accepted tiers:
 
@@ -149,6 +234,15 @@ Accepted tiers:
 | --- | ---: |
 | `premium` | 2 |
 | `standard` | 1 |
+
+Optional placement fields:
+
+| Field | Description |
+| --- | --- |
+| `preferred_region` | Customer's preferred GPU region. Defaults to `DEFAULT_CUSTOMER_REGION`. |
+| `allowed_regions` | Explicit region fallback list. If omitted, only the preferred region is eligible. |
+| `max_latency_ms` | Maximum acceptable latency from preferred customer region to GPU region. Defaults from the selected tier profile. |
+| `gpu_type` | Requested GPU type. Defaults from the selected tier profile; local development uses `mock`. |
 
 `customer_id` must be Kubernetes-safe:
 
@@ -177,6 +271,7 @@ Common error responses:
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `APP_ENV` | `local` | Runtime environment. Set to `production` or `prod` to enable production config validation. |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka bootstrap servers used by the API producer and worker consumer. |
 | `KAFKA_TOPIC` | `gpu-allocations` | Kafka topic for allocation events. |
 | `KAFKA_DLQ_TOPIC` | `gpu-allocations-dlq` | Dead-letter topic for invalid events and workflow-start failures. |
@@ -197,8 +292,35 @@ Common error responses:
 | `HELM_KUBE_CA_FILE` | empty | Optional Kubernetes API CA file passed to Helm. |
 | `HELM_KUBE_TOKEN_FILE` | empty | Optional service-account token file read by the worker and passed to Helm. |
 | `HELM_KUBE_INSECURE_SKIP_TLS_VERIFY` | `false` | Optional Helm TLS verification bypass. Keep this disabled outside short-lived local troubleshooting. |
+| `DEFAULT_CUSTOMER_REGION` | `us-phoenix-1` | Region used when an allocation request omits `preferred_region`. |
+| `GPU_PROFILES_CONFIG_PATH` | `config/gpu-profiles.json` | JSON file path for tier/profile catalog config. |
+| `GPU_PROFILES_CONFIG` | empty | Inline JSON override for the tier/profile catalog. Prefer file paths or mounted ConfigMaps for normal use. |
+| `PLACEMENT_STORE_BACKEND` | `memory` | Reservation backend. Use `postgres` for durable reservations. |
+| `GPU_PLACEMENT_DATABASE_URL` | empty | PostgreSQL connection URL used when `PLACEMENT_STORE_BACKEND=postgres`. Falls back to `DATABASE_URL` if set. |
+| `GPU_POOLS_CONFIG_PATH` | `config/gpu-pools.local.json` | JSON/YAML file path for placement pool seed config. |
+| `GPU_POOLS_CONFIG` | empty | Inline JSON/YAML override for pool seed config. Prefer file paths or mounted ConfigMaps for normal use. |
 | `WORKER_HEALTH_HOST` | `0.0.0.0` | Worker health server bind address. |
 | `WORKER_HEALTH_PORT` | `8081` | Worker health and metrics server port. |
+
+When `APP_ENV=production`, startup validation rejects local-only settings. The
+API must not point Kafka at localhost. The worker must use Postgres
+reservations, non-mock profile GPU types, `HELM_MOCK_GPU=false`, verified Helm
+TLS, and non-local Kafka/Temporal endpoints.
+
+Values that are good candidates for versioned JSON config:
+
+- GPU tier/profile catalog.
+- Local or seeded GPU pool inventory.
+- Region latency matrices if they grow beyond per-pool latency maps.
+- Tenant policy templates, such as allowed fallback region groups.
+- Helm value presets that are product policy, not secrets.
+
+Values that should remain environment variables or Kubernetes Secrets:
+
+- Kafka, Temporal, database, and Kubernetes API endpoints.
+- Database URLs, tokens, certificates, and service-account paths.
+- `APP_ENV`, dry-run flags, TLS verification flags, and operational timeouts.
+- Dynamic reservation state, which belongs in Postgres.
 
 ## Local Prerequisites
 
@@ -337,6 +459,22 @@ kubectl -n gpu-tenant-orchestrator exec deployment/kafka -- \
   --timeout-ms 5000
 ```
 
+### Optional: Use Postgres For Reservations
+
+The local stack runs with `PLACEMENT_STORE_BACKEND=memory` by default. To test
+durable reservations with Neon or another PostgreSQL database, create the
+optional worker secret after the platform namespace exists:
+
+```bash
+kubectl -n gpu-tenant-orchestrator create secret generic gpu-tenant-postgres \
+  --from-literal=PLACEMENT_STORE_BACKEND=postgres \
+  --from-literal=GPU_PLACEMENT_DATABASE_URL='postgresql://USER:PASSWORD@HOST/DB?sslmode=require'
+
+kubectl -n gpu-tenant-orchestrator rollout restart deployment/worker
+```
+
+The worker reads this secret if present. The API does not need database access.
+
 ### 6. Follow Logs
 
 ```bash
@@ -440,7 +578,12 @@ Current coverage focus:
 
 - FastAPI request validation and Kafka publish behavior.
 - API metrics counters.
+- GPU profile catalog loading and validation.
 - Tier-to-GPU allocation rules.
+- Region-aware scheduler reservation, fallback, latency filtering, release, and
+  activation behavior.
+- Postgres reservation-store SQL flow, pool locking, capacity checks, and status
+  updates using a fake connection.
 - Helm command construction.
 - Tenant namespace resolution.
 - Worker metrics and DLQ routing.
@@ -448,6 +591,19 @@ Current coverage focus:
 - Helm failure propagation.
 
 ## Docker Images
+
+Runtime dependencies are split by process:
+
+| File | Used by | Notes |
+| --- | --- | --- |
+| `requirements-common.txt` | API and worker | Shared Kafka client dependency. |
+| `requirements-api.txt` | API image | FastAPI, Uvicorn, and API validation dependencies. |
+| `requirements-worker.txt` | Worker image | Temporal, Kubernetes, Helm integration helpers, YAML parsing, and `psycopg`. |
+| `requirements.txt` | Local aggregate | Installs both API and worker dependencies for development. |
+
+The worker image installs Debian `libpq5` and uses `psycopg==3.2.3` rather than
+`psycopg[binary]`, so the production runtime depends on the OS libpq package
+instead of a bundled binary wheel.
 
 Build the API image:
 
@@ -483,6 +639,12 @@ Important values:
 | `imagePullPolicy` | `IfNotPresent` | Pull policy for the tenant workload image. |
 | `mockGpu` | `true` | Uses CPU requests and a no-op submit path when true; uses `nvidia.com/gpu` and submits to Slurm when false. |
 | `mockCpu` | `250m` | CPU request and limit used for local mock GPU mode. |
+| `gpuType` | `mock` | GPU type selected by placement. |
+| `assignedRegion` | `unassigned` | Region selected by placement. |
+| `assignedCluster` | `unassigned` | Cluster selected by placement. |
+| `gpuPoolId` | `unassigned` | GPU pool selected by placement. |
+| `reservationId` | `unassigned` | Reservation ID created by placement. |
+| `latencyMs` | `0` | Latency estimate for the selected placement. |
 
 ## Observability
 
@@ -497,7 +659,7 @@ Current state:
 - Worker metrics include dispatcher readiness, Temporal worker readiness, Kafka
   processed message count, invalid message count, DLQ count, workflow-start
   failure count, per-customer allocation counts, per-customer GPU count,
-  allocation duration, and completion status.
+  allocation duration, and completion status including `pending_capacity`.
 - Grafana provisions the `GPU Tenant Orchestrator Metrics` dashboard during
   `./scripts/local-kubernetes-deploy.sh up`.
 - API and worker logs are plain stdout/stderr logs.
@@ -586,25 +748,10 @@ venv/bin/python -m py_compile \
   src/temporal/workflows.py
 bash -n scripts/local-kubernetes-deploy.sh
 jq empty deploy/monitoring/grafana/dashboards/gpu-tenant-metrics.json
-kubectl apply --dry-run=client -f deploy/kubernetes/rancher-desktop
+./scripts/local-kubernetes-deploy.sh validate
 docker build -f Dockerfile.api -t gpu-tenant-orchestrator-api .
 docker build -f Dockerfile.worker -t gpu-tenant-orchestrator-worker .
 ```
 
 Use a dedicated secret scanning tool, such as `gitleaks` or `detect-secrets`,
 before publishing the repository or its history.
-
-## Recently Closed Gaps
-
-- The API waits for Kafka delivery confirmation before returning `202`.
-- The worker exposes `/healthz`, `/readyz`, and `/metrics`.
-- Kafka consumption is owned by a `KafkaWorkflowDispatcher` lifecycle wrapper.
-- The worker provisions the primary and DLQ Kafka topics during startup and
-  retries initialization when Kafka is temporarily unavailable.
-- Helm can target tenant-specific namespaces with `HELM_NAMESPACE_TEMPLATE`.
-- Invalid Kafka messages and workflow-start failures are routed to
-  `KAFKA_DLQ_TOPIC`.
-- Prometheus scrapes API and worker application metrics.
-- Grafana dashboards and datasource are provisioned during local deployment.
-- Docker app base images are pinned by digest and app containers run as
-  non-root users.

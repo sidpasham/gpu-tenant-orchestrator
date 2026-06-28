@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "standard": {
+      "gpu_count": 1,
+      "gpu_type": "mock",
+      "default_max_latency_ms": 100
+    },
+    "premium": {
+      "gpu_count": 2,
+      "gpu_type": "mock",
+      "default_max_latency_ms": 80
+    }
+  }
+}

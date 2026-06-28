@@ -4,14 +4,28 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-gpu-tenant-orchestrator}"
 MANIFEST_DIR="deploy/kubernetes/rancher-desktop"
 MANIFEST_FILES=(
-    "$MANIFEST_DIR/00-namespace.yaml"
-    "$MANIFEST_DIR/10-configmaps.yaml"
-    "$MANIFEST_DIR/20-serviceaccounts.yaml"
-    "$MANIFEST_DIR/30-roles.yaml"
-    "$MANIFEST_DIR/31-rolebindings.yaml"
-    "$MANIFEST_DIR/35-services.yaml"
-    "$MANIFEST_DIR/40-deployments.yaml"
-    "$MANIFEST_DIR/70-ingress.yaml"
+    "$MANIFEST_DIR/shared/namespace.yaml"
+    "$MANIFEST_DIR/shared/configmap.yaml"
+    "$MANIFEST_DIR/api/serviceaccount.yaml"
+    "$MANIFEST_DIR/worker/serviceaccount.yaml"
+    "$MANIFEST_DIR/worker/rbac.yaml"
+    "$MANIFEST_DIR/kafka/service.yaml"
+    "$MANIFEST_DIR/temporal/service.yaml"
+    "$MANIFEST_DIR/api/service.yaml"
+    "$MANIFEST_DIR/worker/service.yaml"
+    "$MANIFEST_DIR/monitoring/prometheus/configmap.yaml"
+    "$MANIFEST_DIR/monitoring/prometheus/service.yaml"
+    "$MANIFEST_DIR/monitoring/grafana/service.yaml"
+    "$MANIFEST_DIR/kafka/deployment.yaml"
+    "$MANIFEST_DIR/temporal/deployment.yaml"
+    "$MANIFEST_DIR/api/deployment.yaml"
+    "$MANIFEST_DIR/worker/deployment.yaml"
+    "$MANIFEST_DIR/monitoring/prometheus/deployment.yaml"
+    "$MANIFEST_DIR/monitoring/grafana/deployment.yaml"
+    "$MANIFEST_DIR/api/ingress.yaml"
+    "$MANIFEST_DIR/temporal/ingress.yaml"
+    "$MANIFEST_DIR/monitoring/prometheus/ingress.yaml"
+    "$MANIFEST_DIR/monitoring/grafana/ingress.yaml"
 )
 IMAGE_TAG="${IMAGE_TAG:-$(date +%Y%m%d%H%M%S)}"
 API_IMAGE="${API_IMAGE:-gpu-tenant-orchestrator-api:${IMAGE_TAG}}"
@@ -36,10 +50,11 @@ print_warning() {
 }
 
 show_help() {
-    echo "Usage: ./scripts/local-kubernetes-deploy.sh [up|down|status|logs-api|logs-worker|logs-kafka]"
+    echo "Usage: ./scripts/local-kubernetes-deploy.sh [up|down|status|validate|logs-api|logs-worker|logs-kafka]"
     echo "  up           - Build images and deploy all services to Rancher Desktop Kubernetes"
     echo "  down         - Delete the Kubernetes namespace and all local services"
     echo "  status       - Show Kubernetes resources and ingress endpoints"
+    echo "  validate     - Client-side dry-run validation for managed Kubernetes manifests"
     echo "  logs-api     - Follow API pod logs"
     echo "  logs-worker  - Follow worker pod logs"
     echo "  logs-kafka   - Follow Kafka pod logs"
@@ -147,6 +162,15 @@ show_status() {
     kubectl -n "$NAMESPACE" get pods,deployments,services,jobs,ingress
 }
 
+validate_manifests() {
+    local apply_args=()
+    local manifest_file
+    for manifest_file in "${MANIFEST_FILES[@]}"; do
+        apply_args+=("-f" "$manifest_file")
+    done
+    kubectl apply --dry-run=client "${apply_args[@]}"
+}
+
 case "${1:-}" in
     up)
         deploy_stack
@@ -156,6 +180,9 @@ case "${1:-}" in
         ;;
     status)
         show_status
+        ;;
+    validate)
+        validate_manifests
         ;;
     logs-api)
         require_rancher_desktop

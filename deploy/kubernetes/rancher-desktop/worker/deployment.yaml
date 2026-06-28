@@ -1,0 +1,59 @@
+# Runs the Temporal worker and Kafka dispatcher with health and metrics endpoints.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: gpu-tenant-orchestrator
+  labels:
+    app.kubernetes.io/name: gpu-tenant-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-tenant-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-tenant-worker
+    spec:
+      serviceAccountName: gpu-tenant-worker
+      containers:
+        - name: worker
+          image: gpu-tenant-orchestrator-worker:local
+          imagePullPolicy: Never
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 10001
+          ports:
+            - name: health
+              containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: gpu-tenant-config
+            - secretRef:
+                name: gpu-tenant-postgres
+                optional: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi

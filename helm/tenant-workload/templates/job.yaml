@@ -5,12 +5,26 @@ metadata:
   labels:
     customer: {{ .Values.customerId | quote }}
     tier: {{ .Values.tier | quote }}
+  annotations:
+    gpu-tenant-orchestrator.io/assigned-region: {{ .Values.assignedRegion | quote }}
+    gpu-tenant-orchestrator.io/assigned-cluster: {{ .Values.assignedCluster | quote }}
+    gpu-tenant-orchestrator.io/gpu-pool-id: {{ .Values.gpuPoolId | quote }}
+    gpu-tenant-orchestrator.io/gpu-type: {{ .Values.gpuType | quote }}
+    gpu-tenant-orchestrator.io/reservation-id: {{ .Values.reservationId | quote }}
+    gpu-tenant-orchestrator.io/latency-ms: {{ .Values.latencyMs | quote }}
 spec:
   template:
     metadata:
       labels:
         customer: {{ .Values.customerId | quote }}
         tier: {{ .Values.tier | quote }}
+      annotations:
+        gpu-tenant-orchestrator.io/assigned-region: {{ .Values.assignedRegion | quote }}
+        gpu-tenant-orchestrator.io/assigned-cluster: {{ .Values.assignedCluster | quote }}
+        gpu-tenant-orchestrator.io/gpu-pool-id: {{ .Values.gpuPoolId | quote }}
+        gpu-tenant-orchestrator.io/gpu-type: {{ .Values.gpuType | quote }}
+        gpu-tenant-orchestrator.io/reservation-id: {{ .Values.reservationId | quote }}
+        gpu-tenant-orchestrator.io/latency-ms: {{ .Values.latencyMs | quote }}
     spec:
       containers:
       - name: slurm-cli
@@ -24,6 +38,18 @@ spec:
           value: {{ .Values.gpuCount | quote }}
         - name: MOCK_GPU
           value: {{ .Values.mockGpu | quote }}
+        - name: GPU_TYPE
+          value: {{ .Values.gpuType | quote }}
+        - name: ASSIGNED_REGION
+          value: {{ .Values.assignedRegion | quote }}
+        - name: ASSIGNED_CLUSTER
+          value: {{ .Values.assignedCluster | quote }}
+        - name: GPU_POOL_ID
+          value: {{ .Values.gpuPoolId | quote }}
+        - name: RESERVATION_ID
+          value: {{ .Values.reservationId | quote }}
+        - name: LATENCY_MS
+          value: {{ .Values.latencyMs | quote }}
         resources:
           limits:
             {{- if .Values.mockGpu }}
