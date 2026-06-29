@@ -86,8 +86,18 @@ def test_postgres_backend_requires_database_url(monkeypatch):
 def test_production_api_rejects_localhost_kafka(monkeypatch):
     monkeypatch.setattr(config, "APP_ENV", "production")
     monkeypatch.setattr(config, "KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    monkeypatch.setattr(config, "TEMPORAL_HOST", "temporal.example.com:7233")
 
     with pytest.raises(ValueError, match="KAFKA_BOOTSTRAP_SERVERS"):
+        config.validate_runtime_config("api")
+
+
+def test_production_api_rejects_localhost_temporal(monkeypatch):
+    monkeypatch.setattr(config, "APP_ENV", "production")
+    monkeypatch.setattr(config, "KAFKA_BOOTSTRAP_SERVERS", "kafka.example.com:9093")
+    monkeypatch.setattr(config, "TEMPORAL_HOST", "localhost:7233")
+
+    with pytest.raises(ValueError, match="TEMPORAL_HOST"):
         config.validate_runtime_config("api")
 
 

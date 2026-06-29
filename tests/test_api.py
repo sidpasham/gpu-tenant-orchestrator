@@ -1,7 +1,10 @@
 import json
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from temporalio.client import RPCError, RPCStatusCode, WorkflowExecutionStatus
 
 from src.api import main as api
 
@@ -44,10 +47,50 @@ class DummyKafkaMessage:
         return 0
 
 
+class DummyWorkflowHandle:
+    def __init__(self, status, result=None, error=None):
+        self.status = status
+        self.result_payload = result
+        self.error = error
+        self.describe_calls = 0
+        self.result_calls = 0
+
+    async def describe(self, rpc_timeout):
+        self.describe_calls += 1
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(
+            status=self.status,
+            run_id="run-123",
+            task_queue="gpu-allocation-tasks",
+            start_time=datetime(2026, 6, 29, 12, 0, tzinfo=timezone.utc),
+            close_time=(
+                datetime(2026, 6, 29, 12, 1, tzinfo=timezone.utc)
+                if self.status == WorkflowExecutionStatus.COMPLETED
+                else None
+            ),
+        )
+
+    async def result(self, rpc_timeout):
+        self.result_calls += 1
+        return self.result_payload
+
+
+class DummyTemporalClient:
+    def __init__(self, handle):
+        self.handle = handle
+        self.workflow_ids = []
+
+    def get_workflow_handle(self, workflow_id):
+        self.workflow_ids.append(workflow_id)
+        return self.handle
+
+
 @pytest.fixture(autouse=True)
 def reset_metrics():
     for key in api.metrics:
         api.metrics[key] = 0
+    api.temporal_client = None
     yield
 
 
@@ -62,7 +105,10 @@ def test_allocate_gpu_accepts_valid_request_and_publishes_event(monkeypatch):
     )
 
     assert response.status_code == 202
-    assert response.json() == {
+    response_body = response.json()
+    assert response_body["allocation_id"].startswith("alloc-")
+    assert response_body == {
+        "allocation_id": response_body["allocation_id"],
         "status": "Accepted",
         "message": "GPU Allocation event sent to queue.",
     }
@@ -73,7 +119,7 @@ def test_allocate_gpu_accepts_valid_request_and_publishes_event(monkeypatch):
     assert record["topic"] == api.KAFKA_TOPIC
     assert record["key"] == "team-a"
     payload = json.loads(record["value"])
-    assert payload.pop("allocation_id").startswith("alloc-")
+    assert payload.pop("allocation_id") == response_body["allocation_id"]
     assert payload == {
         "customer_id": "team-a",
         "tier": "premium",
@@ -116,6 +162,82 @@ def test_health_and_readiness_endpoints_do_not_require_kafka():
 
     assert client.get("/healthz").json() == {"status": "ok"}
     assert client.get("/readyz").json() == {"status": "ready"}
+
+
+def test_get_allocation_status_reports_running_workflow(monkeypatch):
+    handle = DummyWorkflowHandle(WorkflowExecutionStatus.RUNNING)
+    temporal_client = DummyTemporalClient(handle)
+
+    async def fake_get_temporal_client():
+        return temporal_client
+
+    monkeypatch.setattr(api, "get_temporal_client", fake_get_temporal_client)
+    client = TestClient(api.app)
+
+    response = client.get("/api/v1/tenant/allocations/alloc-123")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "allocation_id": "alloc-123",
+        "workflow_id": "gpu-alloc-alloc-123",
+        "status": "running",
+        "workflow_status": "running",
+        "run_id": "run-123",
+        "task_queue": "gpu-allocation-tasks",
+        "started_at": "2026-06-29T12:00:00+00:00",
+        "closed_at": None,
+    }
+    assert temporal_client.workflow_ids == ["gpu-alloc-alloc-123"]
+    assert handle.describe_calls == 1
+    assert handle.result_calls == 0
+
+
+def test_get_allocation_status_returns_completed_workflow_result(monkeypatch):
+    handle = DummyWorkflowHandle(
+        WorkflowExecutionStatus.COMPLETED,
+        result={"status": "ACTIVE", "message": "done"},
+    )
+
+    async def fake_get_temporal_client():
+        return DummyTemporalClient(handle)
+
+    monkeypatch.setattr(api, "get_temporal_client", fake_get_temporal_client)
+    client = TestClient(api.app)
+
+    response = client.get("/api/v1/tenant/allocations/alloc-123")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "active"
+    assert body["workflow_status"] == "completed"
+    assert body["closed_at"] == "2026-06-29T12:01:00+00:00"
+    assert body["result"] == {"status": "ACTIVE", "message": "done"}
+    assert handle.result_calls == 1
+
+
+def test_get_allocation_status_reports_queued_when_workflow_has_not_started(
+    monkeypatch,
+):
+    handle = DummyWorkflowHandle(
+        WorkflowExecutionStatus.RUNNING,
+        error=RPCError("not found", RPCStatusCode.NOT_FOUND, b""),
+    )
+
+    async def fake_get_temporal_client():
+        return DummyTemporalClient(handle)
+
+    monkeypatch.setattr(api, "get_temporal_client", fake_get_temporal_client)
+    client = TestClient(api.app)
+
+    response = client.get("/api/v1/tenant/allocations/alloc-123")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "allocation_id": "alloc-123",
+        "workflow_id": "gpu-alloc-alloc-123",
+        "status": "queued",
+        "message": "Allocation event accepted but workflow has not started yet.",
+    }
 
 
 def test_metrics_endpoint_reports_api_counters(monkeypatch):

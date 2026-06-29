@@ -26,6 +26,18 @@ spec:
         gpu-tenant-orchestrator.io/reservation-id: {{ .Values.reservationId | quote }}
         gpu-tenant-orchestrator.io/latency-ms: {{ .Values.latencyMs | quote }}
     spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: slurm-cli
         image: {{ .Values.image | quote }}

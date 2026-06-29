@@ -15,7 +15,20 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: gpu-tenant-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8000"
     spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: gpu-tenant-api
+                topologyKey: kubernetes.io/hostname
       serviceAccountName: gpu-tenant-api
       containers:
         - name: api

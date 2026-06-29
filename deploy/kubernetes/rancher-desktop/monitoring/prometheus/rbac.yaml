@@ -1,0 +1,24 @@
+# Grants Prometheus read-only discovery access for annotated pods and services.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus-discovery
+  namespace: gpu-tenant-orchestrator
+rules:
+  - apiGroups: [""]
+    resources: ["endpoints", "pods", "services"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus-discovery
+  namespace: gpu-tenant-orchestrator
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: gpu-tenant-orchestrator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prometheus-discovery

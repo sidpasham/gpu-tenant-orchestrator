@@ -111,7 +111,7 @@ Kubernetes resources for that component:
 | `deploy/kubernetes/rancher-desktop/worker` | Worker ServiceAccount, RBAC, Deployment, and Service. |
 | `deploy/kubernetes/rancher-desktop/kafka` | Kafka Deployment and Service. |
 | `deploy/kubernetes/rancher-desktop/temporal` | Temporal Deployment, Service, and UI Ingress. |
-| `deploy/kubernetes/rancher-desktop/monitoring/prometheus` | Prometheus ConfigMap, Deployment, Service, and Ingress. |
+| `deploy/kubernetes/rancher-desktop/monitoring/prometheus` | Prometheus ServiceAccount, RBAC, ConfigMap, Deployment, Service, and Ingress. |
 | `deploy/kubernetes/rancher-desktop/monitoring/grafana` | Grafana Deployment, Service, and Ingress. |
 | `deploy/kubernetes/rancher-desktop/database` | Optional Postgres secret example. Not applied by the local deploy script. |
 
@@ -123,8 +123,8 @@ ingresses are created in a stable sequence.
 
 1. A client sends a tenant allocation request to the FastAPI service.
 2. The API validates `customer_id`, `tier`, and optional placement preferences.
-3. The API adds an internal `allocation_id`, publishes a normalized event to
-   Kafka, and waits for delivery
+3. The API creates an `allocation_id`, returns it to the caller, publishes a
+   normalized event to Kafka, and waits for delivery
    confirmation before returning `202`.
 4. The worker dispatcher ensures the primary and DLQ Kafka topics exist before subscribing.
 5. The worker dispatcher consumes the Kafka event and validates the message shape.
@@ -225,8 +225,9 @@ worker uses `DEFAULT_CUSTOMER_REGION` plus the tier defaults from
 `config/gpu-profiles.json`; fallback to another region is not allowed unless
 `allowed_regions` is provided.
 
-The API adds `allocation_id` to the Kafka event. Clients do not send it; the
-worker uses it for Temporal workflow identity and reservation identity.
+The API creates `allocation_id`, returns it in the `202` response, and includes
+the same value in the Kafka event. Clients do not send it; the worker uses it
+for Temporal workflow identity and reservation identity.
 
 Accepted tiers:
 
@@ -254,10 +255,39 @@ Success response:
 
 ```json
 {
+  "allocation_id": "alloc-0b7f5f0d83f94bb7bf52c7bcf34f30e8",
   "status": "Accepted",
   "message": "GPU Allocation event sent to queue."
 }
 ```
+
+### Poll Allocation Status
+
+```http
+GET /api/v1/tenant/allocations/{allocation_id}
+```
+
+The API looks up the Temporal workflow `gpu-alloc-{allocation_id}`. If the
+Kafka event has been accepted but the worker has not started the workflow yet,
+the endpoint returns `queued`.
+
+Running response:
+
+```json
+{
+  "allocation_id": "alloc-0b7f5f0d83f94bb7bf52c7bcf34f30e8",
+  "workflow_id": "gpu-alloc-alloc-0b7f5f0d83f94bb7bf52c7bcf34f30e8",
+  "status": "running",
+  "workflow_status": "running",
+  "run_id": "run-id",
+  "task_queue": "gpu-allocation-tasks",
+  "started_at": "2026-06-29T12:00:00+00:00",
+  "closed_at": null
+}
+```
+
+Completed workflows include the workflow result. Successful allocations return
+`status: "active"` and capacity failures return `status: "pending_capacity"`.
 
 Common error responses:
 
@@ -266,6 +296,7 @@ Common error responses:
 | `400` | Unsupported tier. |
 | `422` | Invalid request shape or invalid `customer_id`. |
 | `500` | Kafka publish failure. |
+| `503` | Temporal is unavailable during allocation status lookup. |
 
 ## Configuration
 
@@ -421,10 +452,34 @@ curl -i -X POST http://gpu-tenant.localhost/api/v1/tenant/allocate \
 Expected success response:
 
 ```json
-{"status":"Accepted","message":"GPU Allocation event sent to queue."}
+{
+  "allocation_id": "alloc-0b7f5f0d83f94bb7bf52c7bcf34f30e8",
+  "status": "Accepted",
+  "message": "GPU Allocation event sent to queue."
+}
 ```
 
 ### 5. Verify The Workflow Result
+
+Poll the allocation returned by the API:
+
+```bash
+curl -s http://gpu-tenant.localhost/api/v1/tenant/allocations/alloc-0b7f5f0d83f94bb7bf52c7bcf34f30e8
+```
+
+Typical completed response:
+
+```json
+{
+  "allocation_id": "alloc-0b7f5f0d83f94bb7bf52c7bcf34f30e8",
+  "workflow_id": "gpu-alloc-alloc-0b7f5f0d83f94bb7bf52c7bcf34f30e8",
+  "status": "active",
+  "workflow_status": "completed",
+  "result": {
+    "status": "ACTIVE"
+  }
+}
+```
 
 Check platform status:
 
@@ -597,7 +652,7 @@ Runtime dependencies are split by process:
 | File | Used by | Notes |
 | --- | --- | --- |
 | `requirements-common.txt` | API and worker | Shared Kafka client dependency. |
-| `requirements-api.txt` | API image | FastAPI, Uvicorn, and API validation dependencies. |
+| `requirements-api.txt` | API image | FastAPI, Uvicorn, API validation, and Temporal status polling dependencies. |
 | `requirements-worker.txt` | Worker image | Temporal, Kubernetes, Helm integration helpers, YAML parsing, and `psycopg`. |
 | `requirements.txt` | Local aggregate | Installs both API and worker dependencies for development. |
 
@@ -645,6 +700,37 @@ Important values:
 | `gpuPoolId` | `unassigned` | GPU pool selected by placement. |
 | `reservationId` | `unassigned` | Reservation ID created by placement. |
 | `latencyMs` | `0` | Latency estimate for the selected placement. |
+| `nodeSelector` | `{}` | Optional strict node labels for tenant workload placement. |
+| `affinity` | `{}` | Optional Kubernetes affinity rules for tenant workload placement. |
+| `tolerations` | `[]` | Optional tolerations for tainted GPU nodes. |
+
+Production GPU node scheduling can be configured through Helm values without
+changing application code. Example:
+
+```yaml
+mockGpu: false
+nodeSelector:
+  accelerator: nvidia
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: gpu.oracle.com/type
+              operator: In
+              values: ["nvidia-a100"]
+            - key: topology.kubernetes.io/region
+              operator: In
+              values: ["us-phoenix-1"]
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+```
+
+The local API and worker manifests use preferred pod anti-affinity only. These
+soft rules spread replicas on multi-node clusters but still allow scheduling on
+Rancher Desktop's single-node Kubernetes cluster.
 
 ## Observability
 
@@ -653,28 +739,32 @@ The local stack includes Prometheus and Grafana configuration under
 
 Current state:
 
-- Prometheus scrapes itself, the API `/metrics` endpoint, and the worker
-  `/metrics` endpoint.
+- Prometheus scrapes itself and discovers annotated API and worker pods in the
+  `gpu-tenant-orchestrator` namespace.
 - API metrics include request, publish success, and publish failure counters.
 - Worker metrics include dispatcher readiness, Temporal worker readiness, Kafka
   processed message count, invalid message count, DLQ count, workflow-start
   failure count, per-customer allocation counts, per-customer GPU count,
   allocation duration, and completion status including `pending_capacity`.
 - Grafana provisions the `GPU Tenant Orchestrator Metrics` dashboard during
-  `./scripts/local-kubernetes-deploy.sh up`.
+  `./scripts/local-kubernetes-deploy.sh up`. The local deploy script restarts
+  Prometheus after scrape ConfigMap changes and restarts Grafana after dashboard
+  ConfigMap changes.
+- Dashboard PromQL aggregates across pod instances, which avoids stale-looking
+  API counters when multiple API replicas are running.
 - API and worker logs are plain stdout/stderr logs.
 
 Useful Prometheus queries:
 
 ```promql
-gpu_tenant_api_allocation_requests_total
-gpu_tenant_api_allocation_publish_success_total
-gpu_tenant_worker_messages_consumed_total
+sum(gpu_tenant_api_allocation_requests_total)
+sum(gpu_tenant_api_allocation_publish_success_total)
+sum(gpu_tenant_worker_messages_consumed_total)
 gpu_tenant_worker_customer_allocations_total
 gpu_tenant_worker_customer_allocation_gpu_count
 gpu_tenant_worker_customer_allocation_duration_seconds
 gpu_tenant_worker_customer_allocations_completed_total
-gpu_tenant_worker_dlq_messages_total
+sum(gpu_tenant_worker_dlq_messages_total)
 ```
 
 The Grafana dashboard includes:
@@ -686,9 +776,9 @@ The Grafana dashboard includes:
 - Total customers.
 - Total GPUs allocated.
 - Average allocation duration.
-- Allocations by tier.
+- Allocations by tier and completion status.
 - Customer allocation GPU count table.
-- Customer allocation duration table.
+- Customer allocation duration table by customer, tier, and completion status.
 
 ## Production Readiness
 

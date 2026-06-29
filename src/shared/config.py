@@ -192,9 +192,11 @@ def validate_runtime_config(component: str) -> None:
             errors.append(
                 "KAFKA_BOOTSTRAP_SERVERS must not point to localhost in production"
             )
+        if normalized_component in {"api", "worker"} and _uses_local_endpoint(
+            TEMPORAL_HOST
+        ):
+            errors.append("TEMPORAL_HOST must not point to localhost in production")
         if normalized_component == "worker":
-            if _uses_local_endpoint(TEMPORAL_HOST):
-                errors.append("TEMPORAL_HOST must not point to localhost in production")
             if HELM_DRY_RUN:
                 errors.append("HELM_DRY_RUN must be false in production")
             if HELM_KUBE_INSECURE_SKIP_TLS_VERIFY:

@@ -1,17 +1,27 @@
+import asyncio
 import json
 import re
 import uuid
+from datetime import timedelta
 from typing import Any
 
 from confluent_kafka import Producer
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Path
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
+from temporalio.client import (
+    Client,
+    RPCError,
+    RPCStatusCode,
+    WorkflowExecutionStatus,
+)
 from src.shared.config import (
     GPU_PROFILES_CONFIG,
     KAFKA_BOOTSTRAP_SERVERS,
     KAFKA_PRODUCER_FLUSH_TIMEOUT_SECONDS,
     KAFKA_TOPIC,
+    TEMPORAL_CONNECT_TIMEOUT_SECONDS,
+    TEMPORAL_HOST,
     validate_runtime_config,
 )
 from src.shared.gpu_profiles import load_gpu_profiles
@@ -22,7 +32,9 @@ app = FastAPI(title="Distributed GPU Tenant Ingress Gateway")
 
 GPU_PROFILE_CATALOG = load_gpu_profiles(GPU_PROFILES_CONFIG)
 PLACEMENT_NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+ALLOCATION_ID_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 producer: Producer | None = None
+temporal_client: Client | None = None
 metrics = {
     "allocation_requests_total": 0,
     "allocation_publish_success_total": 0,
@@ -123,6 +135,41 @@ def get_producer() -> Producer:
     return producer
 
 
+async def get_temporal_client() -> Client:
+    global temporal_client
+
+    if temporal_client is None:
+        temporal_client = await asyncio.wait_for(
+            Client.connect(TEMPORAL_HOST),
+            timeout=TEMPORAL_CONNECT_TIMEOUT_SECONDS,
+        )
+    return temporal_client
+
+
+def workflow_status_name(status: WorkflowExecutionStatus | None) -> str:
+    if status is None:
+        return "unknown"
+    return status.name.lower()
+
+
+def allocation_status_from_workflow_status(
+    status: WorkflowExecutionStatus | None,
+) -> str:
+    if status == WorkflowExecutionStatus.RUNNING:
+        return "running"
+    if status == WorkflowExecutionStatus.COMPLETED:
+        return "completed"
+    return workflow_status_name(status)
+
+
+def isoformat_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
 def delivery_report(err, msg):
     if err is not None:
         print(f"Message delivery failed: {err}")
@@ -198,8 +245,9 @@ def allocate_gpu(request: AllocationRequest):
             detail=f"Invalid tier. Choose {format_accepted_tiers()}.",
         )
 
+    allocation_id = f"alloc-{uuid.uuid4().hex}"
     payload = {
-        "allocation_id": f"alloc-{uuid.uuid4().hex}",
+        "allocation_id": allocation_id,
         "customer_id": request.customer_id,
         "tier": tier,
     }
@@ -215,10 +263,73 @@ def allocate_gpu(request: AllocationRequest):
     try:
         publish_allocation_event(payload)
         metrics["allocation_publish_success_total"] += 1
-        return {"status": "Accepted", "message": "GPU Allocation event sent to queue."}
+        return {
+            "allocation_id": allocation_id,
+            "status": "Accepted",
+            "message": "GPU Allocation event sent to queue.",
+        }
     except Exception as e:
         metrics["allocation_publish_failures_total"] += 1
         raise HTTPException(
             status_code=500,
             detail=f"Failed to publish event to Kafka: {str(e)}",
         )
+
+
+@app.get("/api/v1/tenant/allocations/{allocation_id}")
+async def get_allocation_status(
+    allocation_id: str = Path(
+        min_length=1,
+        max_length=63,
+        pattern=ALLOCATION_ID_PATTERN.pattern,
+        description="Allocation ID returned by POST /api/v1/tenant/allocate.",
+    ),
+):
+    workflow_id = f"gpu-alloc-{allocation_id}"
+
+    try:
+        client = await get_temporal_client()
+        handle = client.get_workflow_handle(workflow_id)
+        description = await handle.describe(
+            rpc_timeout=timedelta(seconds=TEMPORAL_CONNECT_TIMEOUT_SECONDS)
+        )
+    except RPCError as exc:
+        if exc.status == RPCStatusCode.NOT_FOUND:
+            return {
+                "allocation_id": allocation_id,
+                "workflow_id": workflow_id,
+                "status": "queued",
+                "message": "Allocation event accepted but workflow has not started yet.",
+            }
+        raise HTTPException(
+            status_code=503,
+            detail=f"Temporal status lookup failed: {exc.message}",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Temporal status lookup failed: {str(exc)}",
+        ) from exc
+
+    workflow_status = workflow_status_name(description.status)
+    allocation_status = allocation_status_from_workflow_status(description.status)
+    response: dict[str, Any] = {
+        "allocation_id": allocation_id,
+        "workflow_id": workflow_id,
+        "status": allocation_status,
+        "workflow_status": workflow_status,
+        "run_id": description.run_id,
+        "task_queue": description.task_queue,
+        "started_at": isoformat_or_none(description.start_time),
+        "closed_at": isoformat_or_none(description.close_time),
+    }
+
+    if description.status == WorkflowExecutionStatus.COMPLETED:
+        result = await handle.result(
+            rpc_timeout=timedelta(seconds=TEMPORAL_CONNECT_TIMEOUT_SECONDS)
+        )
+        response["result"] = result
+        if isinstance(result, dict) and result.get("status"):
+            response["status"] = str(result["status"]).lower()
+
+    return response

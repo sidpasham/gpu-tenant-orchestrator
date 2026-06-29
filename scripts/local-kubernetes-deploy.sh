@@ -8,7 +8,9 @@ MANIFEST_FILES=(
     "$MANIFEST_DIR/shared/configmap.yaml"
     "$MANIFEST_DIR/api/serviceaccount.yaml"
     "$MANIFEST_DIR/worker/serviceaccount.yaml"
+    "$MANIFEST_DIR/monitoring/prometheus/serviceaccount.yaml"
     "$MANIFEST_DIR/worker/rbac.yaml"
+    "$MANIFEST_DIR/monitoring/prometheus/rbac.yaml"
     "$MANIFEST_DIR/kafka/service.yaml"
     "$MANIFEST_DIR/temporal/service.yaml"
     "$MANIFEST_DIR/api/service.yaml"
@@ -116,6 +118,8 @@ deploy_stack() {
         apply_args+=("-f" "$manifest_file")
     done
     kubectl apply "${apply_args[@]}"
+    print_status "Restarting Prometheus to load scrape configuration..."
+    kubectl -n "$NAMESPACE" rollout restart deployment/prometheus
     apply_grafana_configmaps
 
     print_status "Promoting freshly built images into the API and worker deployments..."

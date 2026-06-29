@@ -33,7 +33,9 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -46,7 +48,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "gpu_tenant_api_allocation_publish_success_total",
+          "expr": "sum(gpu_tenant_api_allocation_publish_success_total) or vector(0)",
           "legendFormat": "API accepted",
           "range": true,
           "refId": "A"
@@ -79,7 +81,9 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -92,7 +96,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "gpu_tenant_worker_messages_consumed_total",
+          "expr": "sum(gpu_tenant_worker_messages_consumed_total) or vector(0)",
           "legendFormat": "Kafka processed",
           "range": true,
           "refId": "A"
@@ -125,7 +129,9 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -138,7 +144,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "gpu_tenant_worker_dlq_messages_total",
+          "expr": "sum(gpu_tenant_worker_dlq_messages_total) or vector(0)",
           "legendFormat": "DLQ events",
           "range": true,
           "refId": "A"
@@ -171,7 +177,9 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -184,7 +192,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "max(gpu_tenant_worker_customer_allocation_duration_seconds{status=\"success\"})",
+          "expr": "max(gpu_tenant_worker_customer_allocation_duration_seconds) or vector(0)",
           "legendFormat": "seconds",
           "range": true,
           "refId": "A"
@@ -217,7 +225,9 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -230,7 +240,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "count(count by (customer_id) (gpu_tenant_worker_customer_allocations_completed_total{status=\"success\"})) or vector(0)",
+          "expr": "count(count by (customer_id) (gpu_tenant_worker_customer_allocations_completed_total)) or vector(0)",
           "legendFormat": "customers",
           "range": true,
           "refId": "A"
@@ -263,7 +273,9 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -309,7 +321,9 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -322,7 +336,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "avg(gpu_tenant_worker_customer_allocation_duration_seconds{status=\"success\"}) or vector(0)",
+          "expr": "avg(gpu_tenant_worker_customer_allocation_duration_seconds) or vector(0)",
           "legendFormat": "seconds",
           "range": true,
           "refId": "A"
@@ -358,7 +372,9 @@
         "namePlacement": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -373,7 +389,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (tier) (gpu_tenant_worker_customer_allocations_completed_total{status=\"success\"})",
+          "expr": "sum by (tier, status) (gpu_tenant_worker_customer_allocations_completed_total)",
           "legendFormat": "{{tier}}",
           "range": true,
           "refId": "A"
@@ -412,7 +428,9 @@
         "footer": {
           "countRows": false,
           "fields": "",
-          "reducer": ["sum"],
+          "reducer": [
+            "sum"
+          ],
           "show": false
         },
         "showHeader": true
@@ -486,7 +504,9 @@
         "footer": {
           "countRows": false,
           "fields": "",
-          "reducer": ["sum"],
+          "reducer": [
+            "sum"
+          ],
           "show": false
         },
         "showHeader": true
@@ -498,7 +518,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (customer_id) (gpu_tenant_worker_customer_allocation_duration_seconds)",
+          "expr": "max by (customer_id, tier, status) (gpu_tenant_worker_customer_allocation_duration_seconds)",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -531,7 +551,11 @@
   "refresh": "5s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["mlops", "gpu", "k8s"],
+  "tags": [
+    "mlops",
+    "gpu",
+    "k8s"
+  ],
   "time": {
     "from": "now-15m",
     "to": "now"
